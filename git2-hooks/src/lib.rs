@@ -29,6 +29,7 @@ mod error;
 mod hookspath;
 
 use std::{
+	env,
 	fs::File,
 	io::{Read, Write},
 	path::{Path, PathBuf},
@@ -45,6 +46,115 @@ pub const HOOK_PRE_COMMIT: &str = "pre-commit";
 pub const HOOK_COMMIT_MSG: &str = "commit-msg";
 pub const HOOK_PREPARE_COMMIT_MSG: &str = "prepare-commit-msg";
 pub const HOOK_PRE_PUSH: &str = "pre-push";
+pub const HOOK_APPLYPATCH_MSG: &str = "applypatch-msg";
+pub const HOOK_PRE_APPLYPATCH: &str = "pre-applypatch";
+pub const HOOK_POST_APPLYPATCH: &str = "post-applypatch";
+pub const HOOK_PRE_MERGE_COMMIT: &str = "pre-merge-commit";
+pub const HOOK_POST_MERGE: &str = "post-merge";
+pub const HOOK_PRE_REBASE: &str = "pre-rebase";
+pub const HOOK_POST_REWRITE: &str = "post-rewrite";
+pub const HOOK_POST_CHECKOUT: &str = "post-checkout";
+pub const HOOK_PRE_AUTO_GC: &str = "pre-auto-gc";
+pub const HOOK_SENDEMAIL_VALIDATE: &str = "sendemail-validate";
+pub const HOOK_UPDATE: &str = "update";
+pub const HOOK_POST_UPDATE: &str = "post-update";
+pub const HOOK_PRE_RECEIVE: &str = "pre-receive";
+pub const HOOK_POST_RECEIVE: &str = "post-receive";
+pub const HOOK_PROC_RECEIVE: &str = "proc-receive";
+pub const HOOK_PUSH_TO_CHECKOUT: &str = "push-to-checkout";
+pub const HOOK_REFERENCE_TRANSACTION: &str = "reference-transaction";
+
+/// Return the current target operating system name.
+///
+/// This is a lightweight wrapper around [`std::env::consts::OS`] so callers
+/// can branch on platform without hard-coding `cfg` checks everywhere.
+pub fn current_os() -> &'static str {
+	std::env::consts::OS
+}
+
+/// Return `true` when the current target is Windows.
+///
+/// Use this when a hook path, shell, or interpreter differs on Windows.
+pub fn is_windows() -> bool {
+	current_os() == "windows"
+}
+
+/// Return `true` when the current target is Unix-like.
+///
+/// This includes Linux, macOS, BSDs, and other Rust-supported Unix targets.
+pub fn is_unix() -> bool {
+	cfg!(unix)
+}
+
+/// Return `true` when the current target is macOS.
+///
+/// This is useful for tests or hook wrappers that need Apple-specific paths or
+/// command-line behavior.
+pub fn is_macos() -> bool {
+	current_os() == "macos"
+}
+
+/// Return `true` when the current target is Linux.
+///
+/// This is useful for tests or hook wrappers that need Linux-specific
+/// assumptions without spelling out `cfg!(target_os = "linux")`.
+pub fn is_linux() -> bool {
+	current_os() == "linux"
+}
+
+/// Find a `gnostr` executable in a caller-provided list of search paths.
+///
+/// The lookup is cross-platform:
+/// - on Unix-like systems the candidate must exist and be executable
+/// - on Windows the candidate only needs to exist as a file
+///
+/// This helper is useful for tests and for callers that already have a custom
+/// PATH-like list they want to search.
+pub fn gnostr_bin_from_paths(paths: &[PathBuf]) -> Option<PathBuf> {
+	find_program_in_paths("gnostr", paths)
+		.or_else(|| find_program_in_paths("gnostr.exe", paths))
+}
+
+/// Find a `gnostr` executable on the current process PATH.
+///
+/// The search honors the `GNOSTR_BIN` environment variable first, then falls
+/// back to the current process PATH.
+pub fn gnostr_bin() -> Option<PathBuf> {
+	if let Ok(path) = env::var("GNOSTR_BIN") {
+		if !path.is_empty() {
+			return Some(PathBuf::from(path));
+		}
+	}
+
+	let path_var = env::var_os("PATH")?;
+	let paths: Vec<PathBuf> = env::split_paths(&path_var).collect();
+	gnostr_bin_from_paths(&paths)
+}
+
+fn find_program_in_paths(
+	program: &str,
+	paths: &[PathBuf],
+) -> Option<PathBuf> {
+	paths.iter().map(|dir| dir.join(program)).find(|candidate| {
+		candidate.is_file() && is_executable(candidate)
+	})
+}
+
+fn is_executable(path: &Path) -> bool {
+	#[cfg(unix)]
+	{
+		use std::os::unix::fs::PermissionsExt;
+
+		path.metadata()
+			.map(|meta| meta.permissions().mode() & 0o111 != 0)
+			.unwrap_or(false)
+	}
+
+	#[cfg(windows)]
+	{
+		path.is_file()
+	}
+}
 
 const HOOK_COMMIT_MSG_TEMP_FILE: &str = "COMMIT_EDITMSG";
 
@@ -271,6 +381,301 @@ pub fn hooks_pre_push(
 	)
 }
 
+fn run_hook_stub(
+	repo: &Repository,
+	other_paths: Option<&[&str]>,
+	hook_name: &str,
+	args: &[&str],
+	stdin: Option<&[u8]>,
+) -> Result<HookResult> {
+	let hook = HookPaths::new(repo, other_paths, hook_name)?;
+
+	if !hook.found() {
+		return Ok(HookResult::NoHookFound);
+	}
+
+	hook.run_hook_os_str_with_stdin(args, stdin)
+}
+
+/// Git invokes `applypatch-msg` when `git am` prepares to apply a patch.
+///
+/// The hook receives the path to the temporary commit-message file as its
+/// first argument, allowing scripts to validate or rewrite the message before
+/// the patch is applied.
+pub fn hooks_applypatch_msg(
+	repo: &Repository,
+	other_paths: Option<&[&str]>,
+	msg_file: &str,
+) -> Result<HookResult> {
+	run_hook_stub(
+		repo,
+		other_paths,
+		HOOK_APPLYPATCH_MSG,
+		&[msg_file],
+		None,
+	)
+}
+
+/// Git invokes `pre-applypatch` after a patch has been applied but before the
+/// resulting commit is finalized.
+///
+/// This helper simply discovers and runs the hook if it exists; the hook
+/// itself decides whether the patch should proceed.
+pub fn hooks_pre_applypatch(
+	repo: &Repository,
+	other_paths: Option<&[&str]>,
+) -> Result<HookResult> {
+	run_hook_stub(repo, other_paths, HOOK_PRE_APPLYPATCH, &[], None)
+}
+
+/// Git invokes `post-applypatch` after `git am` has successfully applied a
+/// patch.
+///
+/// Use this for notifications, cleanup, or lightweight bookkeeping that should
+/// happen only after the patch is committed.
+pub fn hooks_post_applypatch(
+	repo: &Repository,
+	other_paths: Option<&[&str]>,
+) -> Result<HookResult> {
+	run_hook_stub(repo, other_paths, HOOK_POST_APPLYPATCH, &[], None)
+}
+
+/// Git invokes `pre-merge-commit` before it creates a merge commit.
+///
+/// The helper forwards any supplied arguments unchanged. In practice Git uses
+/// this hook as a last chance to veto or adjust a merge before the commit is
+/// written.
+pub fn hooks_pre_merge_commit(
+	repo: &Repository,
+	other_paths: Option<&[&str]>,
+	args: &[&str],
+) -> Result<HookResult> {
+	run_hook_stub(
+		repo,
+		other_paths,
+		HOOK_PRE_MERGE_COMMIT,
+		args,
+		None,
+	)
+}
+
+/// Git invokes `post-merge` after a merge has completed.
+///
+/// This hook is a good place for cache refreshes, notifications, or any
+/// follow-up work that should only run once the merge is already in place.
+pub fn hooks_post_merge(
+	repo: &Repository,
+	other_paths: Option<&[&str]>,
+) -> Result<HookResult> {
+	run_hook_stub(repo, other_paths, HOOK_POST_MERGE, &[], None)
+}
+
+/// Git invokes `pre-rebase` before a rebase begins.
+///
+/// Git may pass the upstream and branch names as arguments. The helper accepts
+/// a caller-supplied argument slice so you can forward exactly what your
+/// workflow needs.
+pub fn hooks_pre_rebase(
+	repo: &Repository,
+	other_paths: Option<&[&str]>,
+	args: &[&str],
+) -> Result<HookResult> {
+	run_hook_stub(repo, other_paths, HOOK_PRE_REBASE, args, None)
+}
+
+/// Git invokes `post-rewrite` after a history-rewriting command finishes.
+///
+/// The first argument identifies the rewrite command and the rewritten commit
+/// mapping is typically streamed on stdin. The helper forwards both pieces
+/// unchanged.
+pub fn hooks_post_rewrite(
+	repo: &Repository,
+	other_paths: Option<&[&str]>,
+	args: &[&str],
+	stdin: Option<&[u8]>,
+) -> Result<HookResult> {
+	run_hook_stub(repo, other_paths, HOOK_POST_REWRITE, args, stdin)
+}
+
+/// Git invokes `post-checkout` after switching branches or checking out paths.
+///
+/// Git passes the old head, the new head, and a `0`/`1` flag that indicates
+/// whether the checkout was a branch switch. This helper formats those values
+/// and runs the hook if it exists.
+pub fn hooks_post_checkout(
+	repo: &Repository,
+	other_paths: Option<&[&str]>,
+	old_head: &str,
+	new_head: &str,
+	branch_switch: bool,
+) -> Result<HookResult> {
+	run_hook_stub(
+		repo,
+		other_paths,
+		HOOK_POST_CHECKOUT,
+		[old_head, new_head, if branch_switch { "1" } else { "0" }]
+			.as_slice(),
+		None,
+	)
+}
+
+/// Git invokes `pre-auto-gc` before auto-garbage-collection runs.
+///
+/// This is a lightweight maintenance hook with no required arguments.
+pub fn hooks_pre_auto_gc(
+	repo: &Repository,
+	other_paths: Option<&[&str]>,
+) -> Result<HookResult> {
+	run_hook_stub(repo, other_paths, HOOK_PRE_AUTO_GC, &[], None)
+}
+
+/// Git invokes `sendemail-validate` while validating mail generated by
+/// `git send-email`.
+///
+/// The helper accepts a caller-supplied argument slice so scripts can mirror
+/// the exact command-line context used by Git.
+pub fn hooks_sendemail_validate(
+	repo: &Repository,
+	other_paths: Option<&[&str]>,
+	args: &[&str],
+) -> Result<HookResult> {
+	run_hook_stub(
+		repo,
+		other_paths,
+		HOOK_SENDEMAIL_VALIDATE,
+		args,
+		None,
+	)
+}
+
+/// Git invokes `update` on the server side once per ref that is about to be
+/// updated.
+///
+/// Git passes the ref name, the old object id, and the new object id as
+/// positional arguments.
+pub fn hooks_update(
+	repo: &Repository,
+	other_paths: Option<&[&str]>,
+	ref_name: &str,
+	old_oid: &str,
+	new_oid: &str,
+) -> Result<HookResult> {
+	run_hook_stub(
+		repo,
+		other_paths,
+		HOOK_UPDATE,
+		[ref_name, old_oid, new_oid].as_slice(),
+		None,
+	)
+}
+
+/// Git invokes `post-update` after refs have been updated.
+///
+/// The hook receives the updated ref names as positional arguments.
+pub fn hooks_post_update(
+	repo: &Repository,
+	other_paths: Option<&[&str]>,
+	refs: &[&str],
+) -> Result<HookResult> {
+	run_hook_stub(repo, other_paths, HOOK_POST_UPDATE, refs, None)
+}
+
+/// Git invokes `pre-receive` before refs are updated on the server side.
+///
+/// The update list is streamed on stdin in the same format Git uses for
+/// receive-pack hooks, so callers can supply that byte stream directly.
+pub fn hooks_pre_receive(
+	repo: &Repository,
+	other_paths: Option<&[&str]>,
+	stdin: &[u8],
+) -> Result<HookResult> {
+	run_hook_stub(
+		repo,
+		other_paths,
+		HOOK_PRE_RECEIVE,
+		&[],
+		Some(stdin),
+	)
+}
+
+/// Git invokes `post-receive` after refs have been updated on the server side.
+///
+/// Like `pre-receive`, this hook receives the reference update list on stdin,
+/// but it is intended for follow-up work that should only happen after the
+/// push has already been accepted.
+pub fn hooks_post_receive(
+	repo: &Repository,
+	other_paths: Option<&[&str]>,
+	stdin: &[u8],
+) -> Result<HookResult> {
+	run_hook_stub(
+		repo,
+		other_paths,
+		HOOK_POST_RECEIVE,
+		&[],
+		Some(stdin),
+	)
+}
+
+/// Git invokes `proc-receive` for custom server-side ref processing.
+///
+/// This helper forwards both the positional arguments and the stdin payload
+/// unchanged so it can be used as a thin runner for experimental or scripted
+/// ref processors.
+pub fn hooks_proc_receive(
+	repo: &Repository,
+	other_paths: Option<&[&str]>,
+	args: &[&str],
+	stdin: &[u8],
+) -> Result<HookResult> {
+	run_hook_stub(
+		repo,
+		other_paths,
+		HOOK_PROC_RECEIVE,
+		args,
+		Some(stdin),
+	)
+}
+
+/// Git invokes `push-to-checkout` when a push needs to update the checked-out
+/// worktree directly.
+///
+/// The hook sees positional arguments describing the update and can inspect or
+/// reject the operation by exiting non-zero.
+pub fn hooks_push_to_checkout(
+	repo: &Repository,
+	other_paths: Option<&[&str]>,
+	args: &[&str],
+) -> Result<HookResult> {
+	run_hook_stub(
+		repo,
+		other_paths,
+		HOOK_PUSH_TO_CHECKOUT,
+		args,
+		None,
+	)
+}
+
+/// Git invokes `reference-transaction` around batches of ref updates.
+///
+/// The first positional argument usually identifies the transaction stage and
+/// the update list is streamed on stdin. This helper forwards both pieces
+/// unchanged for consumers that want to inspect or gate ref transitions.
+pub fn hooks_reference_transaction(
+	repo: &Repository,
+	other_paths: Option<&[&str]>,
+	args: &[&str],
+	stdin: &[u8],
+) -> Result<HookResult> {
+	run_hook_stub(
+		repo,
+		other_paths,
+		HOOK_REFERENCE_TRANSACTION,
+		args,
+		Some(stdin),
+	)
+}
+
 pub enum PrepareCommitMsgSource {
 	Message,
 	Template,
@@ -332,10 +737,19 @@ pub fn hooks_prepare_commit_msg(
 
 #[cfg(test)]
 mod tests {
+	use std::{fs, process::Command};
+
 	use super::*;
 	use git2_testing::{repo_init, repo_init_bare};
 	use pretty_assertions::assert_eq;
 	use tempfile::TempDir;
+
+	#[cfg(not(windows))]
+	fn python_interpreter() -> Option<&'static str> {
+		["python3", "python"].into_iter().find(|candidate| {
+			Command::new(candidate).arg("--version").output().is_ok()
+		})
+	}
 
 	fn branch_update(
 		repo: &Repository,
@@ -370,6 +784,36 @@ mod tests {
 
 	fn head_branch(repo: &Repository) -> String {
 		repo.head().unwrap().shorthand().unwrap().to_string()
+	}
+
+	#[test]
+	fn gnostr_bin_from_paths_finds_gnostr() {
+		let tempdir = TempDir::new().expect("tempdir");
+		let gnostr_name = if cfg!(windows) {
+			"gnostr.exe"
+		} else {
+			"gnostr"
+		};
+		let gnostr_path = tempdir.path().join(gnostr_name);
+
+		fs::write(&gnostr_path, "#!/bin/sh\nexit 0\n")
+			.expect("write gnostr stub");
+		#[cfg(unix)]
+		{
+			use std::os::unix::fs::PermissionsExt;
+
+			let mut perms = fs::metadata(&gnostr_path)
+				.expect("metadata")
+				.permissions();
+			perms.set_mode(0o755);
+			fs::set_permissions(&gnostr_path, perms)
+				.expect("chmod gnostr stub");
+		}
+
+		let found =
+			gnostr_bin_from_paths(&[tempdir.path().to_path_buf()]);
+
+		assert_eq!(found, Some(gnostr_path));
 	}
 
 	#[test]
@@ -696,16 +1140,25 @@ exit 1
 
 		// mirror how python pre-commit sets itself up
 		#[cfg(not(windows))]
-		let hook = b"#!/usr/bin/env python
+		let Some(python) = python_interpreter() else {
+			return;
+		};
+		#[cfg(not(windows))]
+		let hook = format!(
+			"#!/usr/bin/env {python}\n\
 import sys
 sys.exit(0)
-        ";
+        "
+		);
 		#[cfg(windows)]
 		let hook = b"#!/bin/env python.exe
 import sys
 sys.exit(0)
         ";
 
+		#[cfg(not(windows))]
+		create_hook(&repo, HOOK_PRE_COMMIT, hook.as_bytes());
+		#[cfg(windows)]
 		create_hook(&repo, HOOK_PRE_COMMIT, hook);
 		let res = hooks_pre_commit(&repo, None).unwrap();
 		assert!(res.is_successful(), "{res:?}");
@@ -717,16 +1170,25 @@ sys.exit(0)
 
 		// mirror how python pre-commit sets itself up
 		#[cfg(not(windows))]
-		let hook = b"#!/usr/bin/env python
+		let Some(python) = python_interpreter() else {
+			return;
+		};
+		#[cfg(not(windows))]
+		let hook = format!(
+			"#!/usr/bin/env {python}\n\
 import sys
 sys.exit(1)
-        ";
+        "
+		);
 		#[cfg(windows)]
 		let hook = b"#!/bin/env python.exe
 import sys
 sys.exit(1)
         ";
 
+		#[cfg(not(windows))]
+		create_hook(&repo, HOOK_PRE_COMMIT, hook.as_bytes());
+		#[cfg(windows)]
 		create_hook(&repo, HOOK_PRE_COMMIT, hook);
 		let res = hooks_pre_commit(&repo, None).unwrap();
 		assert!(!res.is_successful());
@@ -837,7 +1299,7 @@ exit 2
 		let res = hooks_prepare_commit_msg(
 			&repo,
 			None,
-			PrepareCommitMsgSource::Commit(git2::Oid::zero()),
+			PrepareCommitMsgSource::Commit(git2::Oid::ZERO_SHA1),
 			&mut msg,
 		)
 		.unwrap();

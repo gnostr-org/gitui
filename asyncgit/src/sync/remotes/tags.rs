@@ -67,7 +67,7 @@ fn remote_tag_refs(
 	let remote_heads = conn.list()?;
 	let remote_tags = remote_heads
 		.iter()
-		.map(|s| s.name().to_string())
+		.map(|head| head.name().to_owned())
 		.filter(|name| {
 			name.starts_with("refs/tags/") && !name.ends_with("^{}")
 		})
@@ -89,7 +89,9 @@ pub fn tags_missing_remote(
 
 	let mut local_tags = tags
 		.iter()
-		.filter_map(|tag| tag.map(|tag| format!("refs/tags/{tag}")))
+		.filter_map(|tag| {
+			tag.ok().flatten().map(|tag| format!("refs/tags/{tag}"))
+		})
 		.collect::<HashSet<_>>();
 	let remote_tags =
 		remote_tag_refs(repo_path, remote, basic_credential)?;
